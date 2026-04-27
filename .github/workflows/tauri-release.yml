@@ -1,0 +1,294 @@
+name: 🚀 Tauri Release Builder
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: '要打包的网站 URL'
+        required: true
+        default: 'https://www.mindchat.dpdns.org'
+      app_name:
+        description: '应用名称'
+        required: true
+        default: 'MindChat'
+      app_version:
+        description: '应用版本 '
+        required: true
+        default: '5.3.0'
+
+env:
+  TARGET_URL: ${{ github.event.inputs.target_url || vars.TARGET_URL || 'https://www.mindchat.dpdns.org' }}
+  APP_NAME: ${{ github.event.inputs.app_name || vars.APP_NAME || 'MindChat' }}
+  APP_VERSION: ${{ github.event.inputs.app_version || '5.3.0' }}
+
+jobs:
+  build-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: windows-x86_64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact_suffix: macos-x86_64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact_suffix: macos-aarch64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 生成 Tauri 项目结构 ──────────────────────────────────────────
+      - name: 🏗️ 生成 Tauri 项目文件
+        shell: bash
+        run: |
+          mkdir -p src-tauri/src
+          mkdir -p src-tauri/icons
+
+          # ── tauri.conf.json ────────────────────────────────────────
+          cat > src-tauri/tauri.conf.json << 'CONF'
+          {
+            "build": {
+              "beforeDevCommand": "",
+              "beforeBuildCommand": "",
+              "devUrl": "PLACEHOLDER_URL",
+              "frontendDist": "../dist"
+            },
+            "identifier": "com.webwrapper.app",
+            "app": {
+              "withGlobalTauri": true,
+              "windows": [
+                {
+                  "title": "PLACEHOLDER_NAME",
+                  "width": 1280,
+                  "height": 800,
+                  "resizable": true,
+                  "fullscreen": false,
+                  "url": "PLACEHOLDER_URL"
+                }
+              ]
+            },
+            "bundle": {
+              "active": true,
+              "targets": "all",
+              "icon": [
+                "icons/32x32.png",
+                "icons/128x128.png",
+                "icons/128x128@2x.png",
+                "icons/icon.icns",
+                "icons/icon.ico"
+              ]
+            },
+            "plugins": {}
+          }
+          CONF
+
+          # 替换占位符
+          TARGET_URL_ESCAPED=$(echo "$TARGET_URL" | sed 's/[\/&]/\\&/g')
+          APP_NAME_ESCAPED=$(echo "$APP_NAME" | sed 's/[\/&]/\\&/g')
+          sed -i "s/PLACEHOLDER_URL/$TARGET_URL_ESCAPED/g" src-tauri/tauri.conf.json
+          sed -i "s/PLACEHOLDER_NAME/$APP_NAME_ESCAPED/g" src-tauri/tauri.conf.json
+
+          # ── Cargo.toml ─────────────────────────────────────────────
+          cat > src-tauri/Cargo.toml << CARGO
+          [package]
+          name = "app"
+          version = "$APP_VERSION"
+          description = "$APP_NAME"
+          authors = ["WebWrapper"]
+          edition = "2021"
+          rust-version = "1.77.2"
+
+          [lib]
+          name = "app_lib"
+          crate-type = ["staticlib", "cdylib", "rlib"]
+
+          [build-dependencies]
+          tauri-build = { version = "2", features = [] }
+
+          [dependencies]
+          tauri = { version = "2", features = [] }
+          tauri-plugin-opener = "2"
+          serde = { version = "1", features = ["derive"] }
+          serde_json = "1"
+
+          [profile.release]
+          panic = "abort"
+          codegen-units = 1
+          lto = true
+          opt-level = "s"
+          strip = true
+          CARGO
+
+          # ── build.rs ───────────────────────────────────────────────
+          cat > src-tauri/build.rs << 'RS'
+          fn main() {
+            tauri_build::build()
+          }
+          RS
+
+          # ── src/lib.rs ─────────────────────────────────────────────
+          cat > src-tauri/src/lib.rs << 'RS'
+          #[cfg_attr(mobile, tauri::mobile_entry_point)]
+          pub fn run() {
+            tauri::Builder::default()
+              .plugin(tauri_plugin_opener::init())
+              .run(tauri::generate_context!())
+              .expect("error while running tauri application");
+          }
+          RS
+
+          # ── src/main.rs ────────────────────────────────────────────
+          cat > src-tauri/src/main.rs << 'RS'
+          #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+          fn main() {
+            app_lib::run();
+          }
+          RS
+
+          # ── 占位 dist（Tauri 构建时不需要前端产物，URL 模式直接加载远程） ──
+          mkdir -p dist
+          echo "<html><body>Loading...</body></html>" > dist/index.html
+
+          echo "✅ Tauri 项目文件生成完成"
+          echo "   TARGET_URL = $TARGET_URL"
+          echo "   APP_NAME   = $APP_NAME"
+          echo "   APP_VERSION= $APP_VERSION"
+
+      # ── 生成默认图标 ────────────────────────────────────────────────
+      - name: 🎨 生成默认图标 (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p src-tauri/icons
+          # 使用 ImageMagick 生成简单图标，如需自定义请替换 icons/ 目录下的文件
+          if command -v convert &> /dev/null; then
+            convert -size 256x256 xc:#4f8ef7 \
+              -fill white -font DejaVu-Sans-Bold -pointsize 80 \
+              -gravity center -annotate 0 "W" \
+              src-tauri/icons/icon_256.png
+            convert src-tauri/icons/icon_256.png -resize 32x32   src-tauri/icons/32x32.png
+            convert src-tauri/icons/icon_256.png -resize 128x128  src-tauri/icons/128x128.png
+            convert src-tauri/icons/icon_256.png -resize 256x256  "src-tauri/icons/128x128@2x.png"
+            # macOS icns (需要 iconutil 或 png2icns)
+            cp src-tauri/icons/icon_256.png src-tauri/icons/icon.icns 2>/dev/null || true
+            cp src-tauri/icons/icon_256.png src-tauri/icons/icon.ico  2>/dev/null || true
+          else
+            # Fallback: 用 Python 生成极简 PNG
+            python3 - << 'PY'
+          import struct, zlib, os
+          def make_png(size, color=(79,142,247)):
+              def chunk(t, d):
+                  c = zlib.crc32(t+d) & 0xffffffff
+                  return struct.pack('>I',len(d)) + t + d + struct.pack('>I',c)
+              ihdr = struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)
+              raw  = b''.join(b'\x00'+bytes(color)*size for _ in range(size))
+              idat = zlib.compress(raw)
+              return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR',ihdr) + chunk(b'IDAT',idat) + chunk(b'IEND',b'')
+          os.makedirs('src-tauri/icons', exist_ok=True)
+          for name, size in [('32x32',32),('128x128',128),('128x128@2x',256)]:
+              open(f'src-tauri/icons/{name}.png','wb').write(make_png(size))
+          for name in ('icon.icns','icon.ico'):
+              open(f'src-tauri/icons/{name}','wb').write(make_png(256))
+          PY
+          fi
+
+      - name: 🎨 生成默认图标 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/icons | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          foreach ($cfg in @(@{n='32x32';s=32},@{n='128x128';s=128},@{n='128x128@2x';s=256},@{n='icon';s=256})) {
+            $bmp = New-Object System.Drawing.Bitmap($cfg.s, $cfg.s)
+            $g   = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(79,142,247))
+            $font = New-Object System.Drawing.Font("Arial", ($cfg.s * 0.35), [System.Drawing.FontStyle]::Bold)
+            $brush = [System.Drawing.Brushes]::White
+            $sf = New-Object System.Drawing.StringFormat
+            $sf.Alignment = [System.Drawing.StringAlignment]::Center
+            $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $g.DrawString("W", $font, $brush, [System.Drawing.RectangleF]::new(0,0,$cfg.s,$cfg.s), $sf)
+            $g.Dispose()
+            $bmp.Save("src-tauri/icons/$($cfg.n).png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+          }
+          Copy-Item src-tauri/icons/icon.png src-tauri/icons/icon.icns -ErrorAction SilentlyContinue
+          Copy-Item src-tauri/icons/icon.png src-tauri/icons/icon.ico  -ErrorAction SilentlyContinue
+
+      # ── 系统依赖 ────────────────────────────────────────────────────
+      - name: 🔧 安装 Linux 系统依赖
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            imagemagick
+
+      # ── Rust ─────────────────────────────────────────────────────────
+      - name: 🦀 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 📦 缓存 Rust 依赖
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ${{ matrix.target }}
+
+      # ── Node.js（tauri-action 需要）────────────────────────────────
+      - name: 🟢 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 构建 & 发布 ──────────────────────────────────────────────────
+      - name: 🔨 构建并发布 Tauri 应用
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 代码签名（可选，不配置则跳过签名）
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name || format('v{0}', env.APP_VERSION) }}
+          releaseName: '${{ env.APP_NAME }} v__VERSION__'
+          releaseBody: |
+            ## ${{ env.APP_NAME }} ${{ env.APP_VERSION }}
+
+            🌐 **打包网站**: ${{ env.TARGET_URL }}
+
+            ### 下载说明
+            | 平台 | 文件 |
+            |------|------|
+            | Windows | `.msi` 或 `.exe` |
+            | macOS Intel | `x64.dmg` |
+            | macOS Apple Silicon | `aarch64.dmg` |
+            | Linux | `.AppImage` 或 `.deb` |
+
+            > 首次运行 macOS 版本若提示"无法验证开发者"，请右键点击应用 → 打开。
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.target }}
+          projectPath: '.'
+          tauriScript: npx tauri
