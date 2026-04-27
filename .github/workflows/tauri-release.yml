@@ -90,6 +90,8 @@ jobs:
           TARGET_URL:  ${{ env.TARGET_URL }}
           APP_NAME:    ${{ env.APP_NAME }}
           APP_VERSION: ${{ env.APP_VERSION }}
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: |
           import os, json, textwrap, struct, zlib
 
@@ -228,7 +230,7 @@ jobs:
                   f.write(make_png(sz))
 
           print("=" * 60)
-          print("✅ 所有文件生成完成")
+          print("[OK] All project files generated successfully")
           print(f"   TARGET_URL  = {url}")
           print(f"   APP_NAME    = {name}")
           print(f"   APP_VERSION = {version}")
